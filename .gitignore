@@ -1,0 +1,10 @@
+/target
+**/target/
+scripts/out/
+*.wasc
+*.wasm
+*.png
+
+# This is a library, so its own lockfile is not committed. The example and
+# template crates are end products and keep theirs.
+/Cargo.lock

@@ -1,0 +1,31 @@
+[package]
+name = "wasmcart"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.79"
+description = "Rust bindings for the wasmcart cart ABI (v3): write a WASM game cartridge with no runtime, no wasm-bindgen, and no imports"
+license = "MIT"
+repository = "https://github.com/monteslu/wasmcart-rust"
+homepage = "https://wasmcart.org"
+documentation = "https://docs.rs/wasmcart"
+readme = "README.md"
+keywords = ["wasm", "webassembly", "gamedev", "cartridge", "no_std"]
+categories = ["game-development", "no-std", "wasm"]
+exclude = ["examples/*/target", "template/target", "scripts/out"]
+
+[features]
+default = []
+# Link against std. NOT the default: on wasm32-unknown-unknown std drags in
+# panic machinery and an allocator that make the cart substantially larger.
+# Enable only if the cart genuinely wants Vec/String, and supply your own
+# #[global_allocator] (std has no default one on this target).
+std = []
+
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1

@@ -1,0 +1,19 @@
+[package]
+name = "my-cart"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# A wasmcart cart is a freestanding cdylib. Not a bin: it has no main, the host
+# calls its exports.
+crate-type = ["cdylib"]
+
+[dependencies]
+wasmcart = "0.1"
+
+[profile.release]
+opt-level = "z"   # carts are small; size beats the last few percent of speed
+lto = true
+panic = "abort"   # unwinding has no meaning in a cart
+strip = true
+codegen-units = 1
