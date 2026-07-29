@@ -14,6 +14,13 @@ mkdir -p "$OUT"
 
 WASMCART=${WASMCART:-npx --yes wasmcart}
 
+# The compile-time asserts in src/lib.rs prove the structs are self-consistent.
+# They cannot prove a CONSTANT is right, because they only compare the crate
+# against itself. This compares it against wasmcart's own src/abi.js.
+echo "── abi drift: constants must match the spec ──"
+node scripts/abi-drift.mjs
+echo
+
 build_and_pack() {
   local dir=$1 name=$2
   echo "── $name ────────────────────────────────────────────"
