@@ -79,10 +79,10 @@ pub const WC_BTN_R3: u16 = 1 << 13;
 
 /// Audio ring buffer holds `f32` samples rather than `i16`.
 pub const WC_FLAG_AUDIO_F32: u32 = 1 << 0;
-/// Cart wants WebSocket imports.
-pub const WC_FLAG_NET_WS: u32 = 1 << 1;
-/// Cart wants data-channel imports.
-pub const WC_FLAG_NET_DC: u32 = 1 << 2;
+/// Cart wants peer-connection imports.
+pub const WC_FLAG_NET_PEER: u32 = 1 << 1;
+// 1 << 2 is RESERVED AND UNUSED. It was WC_FLAG_NET_DC until wasmcart 0.16.0
+// merged the WebSocket and data-channel families into wc_peer_*.
 /// Cart wants pointer (mouse/touch) input.
 pub const WC_FLAG_POINTER: u32 = 1 << 3;
 /// Cart wants raw keyboard input.
