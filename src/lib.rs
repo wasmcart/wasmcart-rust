@@ -1,6 +1,6 @@
 //! # wasmcart
 //!
-//! Rust bindings for the [wasmcart](https://github.com/monteslu/wasmcart) cart ABI (v3).
+//! Rust bindings for the [wasmcart](https://github.com/wasmcart/wasmcart) cart ABI (v3).
 //!
 //! A wasmcart cart is a freestanding `wasm32-unknown-unknown` module that exports
 //! `memory`, `wc_get_info`, `wc_render` (and, optionally but conventionally,

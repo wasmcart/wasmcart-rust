@@ -1,6 +1,6 @@
 # wasmcart-rust
 
-Rust bindings for the [wasmcart](https://github.com/monteslu/wasmcart) cart ABI.
+Rust bindings for the [wasmcart](https://github.com/wasmcart/wasmcart) cart ABI.
 
 A wasmcart cart is a freestanding `wasm32-unknown-unknown` module. There is no
 runtime to embed, no JS glue, and no `wasm-bindgen`: this crate is a set of
