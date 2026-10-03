@@ -556,8 +556,9 @@ const _: () = {
     use core::mem::{align_of, size_of};
     assert!(size_of::<WcPad>() == 20);
     // ABI v4 widened buttons to u32 and the triggers to i16, which moved
-    // `connected` from 14 to 16. A host reading byte 14 for it would see the
-    // low byte of right_trigger, so pin the offsets, not just the size.
+    // every field after `buttons`: `connected` went from byte 12 to 16, and
+    // byte 12 is now the low byte of left_trigger. Pin the offsets, not just
+    // the size.
     assert!(core::mem::offset_of!(WcPad, left_x) == 4);
     assert!(core::mem::offset_of!(WcPad, left_trigger) == 12);
     assert!(core::mem::offset_of!(WcPad, right_trigger) == 14);
