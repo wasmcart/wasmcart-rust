@@ -247,6 +247,7 @@ macro_rules! wc_cart_config {
                 pointer_ptr: 0,
                 keys_ptr: 0,
                 gpu_api: CFG.gpu_api,
+                wheel_ptr: 0,
             };
         }
 

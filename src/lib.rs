@@ -1,6 +1,6 @@
 //! # wasmcart
 //!
-//! Rust bindings for the [wasmcart](https://github.com/wasmcart/wasmcart) cart ABI (v3).
+//! Rust bindings for the [wasmcart](https://github.com/wasmcart/wasmcart) cart ABI (v4).
 //!
 //! A wasmcart cart is a freestanding `wasm32-unknown-unknown` module that exports
 //! `memory`, `wc_get_info`, `wc_render` (and, optionally but conventionally,
@@ -56,24 +56,50 @@ pub mod __private {
 }
 
 /// ABI version implemented by this crate.
-pub const WC_ABI_VERSION: u32 = 3;
+pub const WC_ABI_VERSION: u32 = 4;
 
 // ─── Buttons (wc_pad_t.buttons bitmask) ──────────────────────────────────
 
-pub const WC_BTN_A: u16 = 1 << 0;
-pub const WC_BTN_B: u16 = 1 << 1;
-pub const WC_BTN_X: u16 = 1 << 2;
-pub const WC_BTN_Y: u16 = 1 << 3;
-pub const WC_BTN_L: u16 = 1 << 4;
-pub const WC_BTN_R: u16 = 1 << 5;
-pub const WC_BTN_START: u16 = 1 << 6;
-pub const WC_BTN_SELECT: u16 = 1 << 7;
-pub const WC_BTN_UP: u16 = 1 << 8;
-pub const WC_BTN_DOWN: u16 = 1 << 9;
-pub const WC_BTN_LEFT: u16 = 1 << 10;
-pub const WC_BTN_RIGHT: u16 = 1 << 11;
-pub const WC_BTN_L3: u16 = 1 << 12;
-pub const WC_BTN_R3: u16 = 1 << 13;
+pub const WC_BTN_A: u32 = 1 << 0;
+pub const WC_BTN_B: u32 = 1 << 1;
+pub const WC_BTN_X: u32 = 1 << 2;
+pub const WC_BTN_Y: u32 = 1 << 3;
+pub const WC_BTN_L: u32 = 1 << 4;
+pub const WC_BTN_R: u32 = 1 << 5;
+pub const WC_BTN_START: u32 = 1 << 6;
+pub const WC_BTN_SELECT: u32 = 1 << 7;
+pub const WC_BTN_UP: u32 = 1 << 8;
+pub const WC_BTN_DOWN: u32 = 1 << 9;
+pub const WC_BTN_LEFT: u32 = 1 << 10;
+pub const WC_BTN_RIGHT: u32 = 1 << 11;
+pub const WC_BTN_L3: u32 = 1 << 12;
+pub const WC_BTN_R3: u32 = 1 << 13;
+// ABI v4 additions, completing parity with SDL2's controller button set.
+// Bits 0-13 keep their meanings. A pad that lacks one of these never sets the
+// bit, so a cart may read them unconditionally. Bits 21-31 are reserved.
+/// The centre/home/logo button.
+pub const WC_BTN_GUIDE: u32 = 1 << 14;
+/// Share/capture/microphone; varies by pad.
+pub const WC_BTN_MISC1: u32 = 1 << 15;
+/// Upper right paddle (Elite/Pro layouts).
+pub const WC_BTN_PADDLE1: u32 = 1 << 16;
+/// Upper left paddle.
+pub const WC_BTN_PADDLE2: u32 = 1 << 17;
+/// Lower right paddle.
+pub const WC_BTN_PADDLE3: u32 = 1 << 18;
+/// Lower left paddle.
+pub const WC_BTN_PADDLE4: u32 = 1 << 19;
+/// Clicking the touchpad itself (DualShock).
+pub const WC_BTN_TOUCHPAD: u32 = 1 << 20;
+
+// ─── Triggers ────────────────────────────────────────────────────────────
+
+/// Full travel on a trigger (`WcPad::left_trigger` / `right_trigger`),
+/// matching SDL2 and libretro.
+pub const WC_TRIGGER_MAX: i16 = 32767;
+/// Where a runtime presenting a trigger as a digital button should call it
+/// pressed (~10% of travel). A cart reading the analog value may pick its own.
+pub const WC_TRIGGER_PRESSED: i16 = 3277;
 
 // ─── Cart info flags (WcInfo.flags) ──────────────────────────────────────
 
@@ -119,17 +145,23 @@ pub const WC_RUMBLE_MAX_MS: u32 = 5000;
 
 // ─── Structs ─────────────────────────────────────────────────────────────
 
-/// Gamepad state, 16 bytes. The host writes this before each `wc_render`.
+/// Gamepad state, 20 bytes. The host writes this before each `wc_render`.
+///
+/// Every analog axis is `i16` (ABI v4): sticks are -32768..32767 and triggers
+/// are 0..[`WC_TRIGGER_MAX`], the same ranges SDL2 and libretro report.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WcPad {
-    pub buttons: u16,
+    /// `WC_BTN_*` bitmask; bits 21-31 are reserved.
+    pub buttons: u32,
     pub left_x: i16,
     pub left_y: i16,
     pub right_x: i16,
     pub right_y: i16,
-    pub left_trigger: u8,
-    pub right_trigger: u8,
+    /// 0..=[`WC_TRIGGER_MAX`], never negative.
+    pub left_trigger: i16,
+    /// 0..=[`WC_TRIGGER_MAX`], never negative.
+    pub right_trigger: i16,
     pub connected: u8,
     pub _pad: [u8; 3],
 }
@@ -137,7 +169,7 @@ pub struct WcPad {
 impl WcPad {
     /// True if any of `mask`'s buttons are held.
     #[inline]
-    pub fn down(&self, mask: u16) -> bool {
+    pub fn down(&self, mask: u32) -> bool {
         self.buttons & mask != 0
     }
     /// True if the host reports this pad as present.
@@ -227,7 +259,25 @@ pub struct WcInfo {
     pub keys_ptr: u32,
     /// `WC_GPU_API_*`.
     pub gpu_api: u32,
+    /// [`WcWheel`], 0 = unused (ABI v3.1). The host reads this word whether
+    /// or not the cart uses a wheel, so it must exist and be 0 when unused:
+    /// without it the host reads whatever static follows the struct.
+    pub wheel_ptr: u32,
 }
+
+/// Scroll wheel delta, 8 bytes (ABI v3.1). Units are 1/120 of a notch.
+/// Host-written before `wc_render` and host-cleared after; the cart only reads.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WcWheel {
+    /// Horizontal scroll, right positive.
+    pub dx: i32,
+    /// Vertical scroll, UP positive.
+    pub dy: i32,
+}
+
+/// One notch of a detented wheel, in [`WcWheel`] units.
+pub const WC_WHEEL_DELTA: i32 = 120;
 
 // ─── Keyboard ────────────────────────────────────────────────────────────
 
@@ -504,10 +554,18 @@ pub fn wc_load_asset(path: &str, dest: &mut [u8]) -> Option<usize> {
 
 const _: () = {
     use core::mem::{align_of, size_of};
-    assert!(size_of::<WcPad>() == 16);
+    assert!(size_of::<WcPad>() == 20);
+    // ABI v4 widened buttons to u32 and the triggers to i16, which moved
+    // `connected` from 14 to 16. A host reading byte 14 for it would see the
+    // low byte of right_trigger, so pin the offsets, not just the size.
+    assert!(core::mem::offset_of!(WcPad, left_x) == 4);
+    assert!(core::mem::offset_of!(WcPad, left_trigger) == 12);
+    assert!(core::mem::offset_of!(WcPad, right_trigger) == 14);
+    assert!(core::mem::offset_of!(WcPad, connected) == 16);
     assert!(size_of::<WcTime>() == 24); // 20 bytes of fields, padded to align 8
     assert!(align_of::<WcTime>() == 8);
     assert!(size_of::<WcHostInfo>() == 20);
     assert!(size_of::<WcPointer>() == 8);
-    assert!(size_of::<WcInfo>() == 68); // 17 u32 fields
+    assert!(size_of::<WcInfo>() == 72); // 18 u32 fields
+    assert!(size_of::<WcWheel>() == 8);
 };

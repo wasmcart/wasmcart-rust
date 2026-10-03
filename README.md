@@ -227,18 +227,18 @@ suppresses the generated panic handler (`std` brings its own).
 
 ## ABI notes
 
-`WcInfo` is 17 `u32` fields and the order is load-bearing. The v3 tail
+`WcInfo` is 18 `u32` fields and the order is load-bearing. The v3 tail
 (`pointer_ptr` at 56, `keys_ptr` at 60, `gpu_api` at 64) is what hand-written
 bindings get wrong. The struct sizes are asserted at compile time against the
 host's `src/abi.js`, so a drifted binding is a build error rather than a cart
 that renders garbage:
 
 ```
-WcPad      16 bytes
+WcPad      20 bytes (u32 buttons, six i16 axes incl. triggers)
 WcTime     24 bytes (20 of fields, padded to align 8)
 WcHostInfo 20 bytes
 WcPointer   8 bytes
-WcInfo     68 bytes
+WcInfo     72 bytes (wheel_ptr at 68, 0 = unused)
 ```
 
 `wc_get_info` must return a pointer to a **live** struct, never a copy: the

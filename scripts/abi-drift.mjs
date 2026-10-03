@@ -53,7 +53,7 @@ const src = readFileSync(path.join(CRATE, 'src', 'lib.rs'), 'utf8');
  * uses. Deliberately not a full expression parser: anything it cannot read is
  * reported as unreadable rather than silently skipped. */
 function rustConst(name) {
-  const m = src.match(new RegExp(`pub const ${name}\\s*:\\s*u32\\s*=\\s*([^;]+);`));
+  const m = src.match(new RegExp(`pub const ${name}\\s*:\\s*[ui](?:8|16|32)\\s*=\\s*([^;]+);`));
   if (!m) return undefined;
   const e = m[1].trim();
   const shift = e.match(/^1\s*<<\s*(\d+)$/);
@@ -73,6 +73,8 @@ const CONSTS = {
   FLAG_DETERMINISTIC: 'WC_FLAG_DETERMINISTIC',
   GPU_API_NONE: 'WC_GPU_API_NONE',
   GPU_API_WEBGL2: 'WC_GPU_API_WEBGL2',
+  TRIGGER_MAX: 'WC_TRIGGER_MAX',
+  WHEEL_DELTA: 'WC_WHEEL_DELTA',
 };
 
 /* Names the spec has RETIRED. A binding that still declares one is telling its
@@ -128,7 +130,7 @@ if (abi.INFO_FIELDS_V3) {
     'version', 'width', 'height', 'fb_ptr', 'audio_ptr', 'audio_cap',
     'audio_write_ptr', 'input_ptr', 'save_ptr', 'save_size', 'time_ptr',
     'host_info_ptr', 'flags', 'audio_sample_rate', 'pointer_ptr', 'keys_ptr',
-    'gpu_api',
+    'gpu_api', 'wheel_ptr',
   ];
   const body = src.match(/pub struct WcInfo\s*\{([^}]*)\}/s);
   if (!body) problems.push('could not find `pub struct WcInfo` to check field order');
