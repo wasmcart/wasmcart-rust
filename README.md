@@ -70,10 +70,15 @@ cargo build --release --target wasm32-unknown-unknown
 
 npx wasmcart pack \
   --wasm target/wasm32-unknown-unknown/release/my_cart.wasm \
-  --name my_cart -o my_cart.wasc
+  --name my_cart --version 0.1.0 -o my_cart.wasc
 
 npx wasmcart my_cart.wasc
 ```
+
+The cart's version is the crate's: `--version` takes `version` from
+`Cargo.toml` (`template/build.sh` reads it with `cargo metadata`). Without
+`--version`, wasmcart-pack 0.39.0 or later takes it from the git checkout
+instead.
 
 `--frames 30 --shot out.png` runs headless and writes a screenshot, which is
 how you check a cart actually renders. See [Testing](#testing).
