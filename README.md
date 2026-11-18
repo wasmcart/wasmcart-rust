@@ -272,6 +272,13 @@ What differs from wgpu on a desktop:
 `scripts/gen-webgpu-ffi.mjs` (webgpu.h types plus compile-time checks of every
 struct offset against the table the host's glue reads cart memory with).
 
+## Engines
+
+Game engines built on this crate live in their own repos:
+
+- [wasmcart-macroquad](https://github.com/wasmcart/wasmcart-macroquad): macroquad
+  games on the GL tier, with gamepads and audio.
+
 ## Examples
 
 ```sh
