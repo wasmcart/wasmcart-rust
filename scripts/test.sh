@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build both examples, pack them, run them, and check the output is not blank.
+# Build the examples, pack them, run them, and check the output is not blank.
 # This is the gate: "it built" and "it ran N frames" are not evidence that a
 # cart renders anything. The 2D example is checked by reading its framebuffer
 # back through the host; the GL example needs a real GL context, so it is
@@ -49,6 +49,18 @@ node scripts/notblank.mjs "$OUT/hello.png"
 build_and_pack hello_gl hello_gl
 echo "hello_gl needs a GL context; checking with scripts/glcheck.mjs"
 node scripts/glcheck.mjs "$OUT/hello_gl.wasc" "$OUT/hello_gl.png"
+
+# wgpu carts (wasmcart-wgpu). The import gate checks them against the WebGPU
+# tier's own lists (no wasm-bindgen, nothing outside the frozen import set);
+# wgpucheck runs them on the Node host's WebGPU, core and compatibility mode,
+# checks pixels and async results, and runs its must-fail controls.
+build_and_pack wgpu_triangle wgpu_triangle
+node scripts/wgpuimports.mjs examples/wgpu_triangle/target/wasm32-unknown-unknown/release/wgpu_triangle.wasm
+build_and_pack wgpu_scene wgpu_scene
+node scripts/wgpuimports.mjs examples/wgpu_scene/target/wasm32-unknown-unknown/release/wgpu_scene.wasm
+echo "── wgpu carts on WebGPU: pixels, async results, controls ──"
+node scripts/wgpucheck.mjs "$OUT/wgpu_triangle.wasc" "$OUT/wgpu_scene.wasc" "$OUT"
+echo
 
 # Control that MUST fail. If the host accepts a cart with no wc_get_info, the
 # harness above is not actually validating anything and every green run is

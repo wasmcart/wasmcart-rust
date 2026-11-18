@@ -1,0 +1,25 @@
+[package]
+name = "wasmcart-wgpu"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "A wgpu backend for wasmcart carts: wgpu's custom backend over the WebGPU imports wasmcart hosts provide"
+license = "MIT"
+repository = "https://github.com/wasmcart/wasmcart-rust"
+homepage = "https://wasmcart.org"
+keywords = ["wasm", "webgpu", "wgpu", "gamedev", "cartridge"]
+categories = ["game-development", "graphics", "wasm"]
+readme = "README.md"
+
+[features]
+default = ["alloc-exports"]
+# Export wc_alloc / wc_free (the host's WebGPU glue allocates in cart memory
+# through them). Turn off if the cart exports its own pair.
+alloc-exports = []
+# Accept ShaderSource::Naga modules: validated and written out as WGSL in the
+# cart (pulls naga in).
+naga-ir = ["wgpu/naga-ir", "dep:naga"]
+
+[dependencies]
+wgpu = { version = "30", default-features = false, features = ["custom", "wgsl"] }
+naga = { version = "30", default-features = false, features = ["wgsl-out"], optional = true }

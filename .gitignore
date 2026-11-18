@@ -8,3 +8,6 @@ scripts/out/
 # This is a library, so its own lockfile is not committed. The example and
 # template crates are end products and keep theirs.
 /Cargo.lock
+
+# wasmcart-wgpu is a library too.
+/wasmcart-wgpu/Cargo.lock

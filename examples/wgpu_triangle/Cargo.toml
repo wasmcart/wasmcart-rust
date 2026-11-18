@@ -1,0 +1,20 @@
+[package]
+name = "wgpu_triangle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# std gives the cart Rust's allocator; wgpu needs one.
+wasmcart = { path = "../..", features = ["std"] }
+wasmcart-wgpu = { path = "../../wasmcart-wgpu" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1
