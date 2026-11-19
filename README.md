@@ -279,6 +279,10 @@ Game engines built on this crate live in their own repos:
 - [wasmcart-macroquad](https://github.com/wasmcart/wasmcart-macroquad): macroquad
   games on the GL tier, with gamepads and audio.
 
+Examples: [wasmcart-rust-examples](https://github.com/wasmcart/wasmcart-rust-examples),
+four complete games (three on macroquad, one 3D game on wgpu through
+`wasmcart-wgpu`) with prebuilt carts on its releases.
+
 ## Examples
 
 ```sh
