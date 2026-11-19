@@ -65,6 +65,7 @@ pub mod ffi;
 
 mod alloc_exports;
 mod backend;
+mod compat;
 mod conv;
 mod emwgpu;
 
@@ -142,6 +143,36 @@ pub fn is_core(device: &wgpu::Device) -> bool {
     device.as_custom::<WcDevice>().map(|d| d.is_core()).unwrap_or(false)
 }
 
+/// Ask for a **core** WebGPU device with `desc`'s features and limits.
+///
+/// A host makes its device at core where the adapter offers it, else in
+/// compatibility mode, and a host may be told to make it in compatibility
+/// mode regardless. A cart that wants core where the GPU has it asks for the
+/// `core-features-and-limits` feature (wasmcart SPEC.md, "Feature level");
+/// wgpu has no `Features` flag for it, so this asks for it alongside
+/// `desc`. The host's own device answers at once if it is core and meets
+/// `desc`; otherwise the host makes a new device, which arrives between
+/// frames (poll the future each frame, e.g. with [`poll_once`]), or the
+/// request fails where the GPU has no core device. `adapter` must come from
+/// [`instance`].
+pub fn request_core(
+    adapter: &wgpu::Adapter,
+    desc: &wgpu::DeviceDescriptor<'_>,
+) -> impl Future<Output = Result<(wgpu::Device, wgpu::Queue), wgpu::RequestDeviceError>> + 'static {
+    let a = adapter.as_custom::<crate::backend::WcAdapter>().expect("not a wasmcart adapter");
+    wgpu::Adapter::from_custom(a.wanting_core()).request_device(desc)
+}
+
+/// An adapter describing `device`: its features, limits, downlevel flags and
+/// surface formats. A device from [`request_core`] (or any request the host
+/// answered with a new device) is not the device the adapter it was asked
+/// through describes; code that reads the adapter (a renderer choosing its
+/// paths, a surface choosing its format) should be given this one.
+pub fn adapter_for(device: &wgpu::Device) -> wgpu::Adapter {
+    let d = device.as_custom::<WcDevice>().expect("not a wasmcart device");
+    wgpu::Adapter::from_custom(crate::backend::WcAdapter::for_device(&WcInstance::create(), d))
+}
+
 /// A wgpu instance backed by the host's WebGPU.
 pub fn instance() -> wgpu::Instance {
     wgpu::Instance::from_custom(WcInstance::create())
@@ -213,7 +244,10 @@ pub struct Gpu {
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
     /// [`Frame::view`] is an sRGB view: the GPU encodes linear colour on
-    /// write. False on a compatibility-mode device.
+    /// write. True on every device this crate makes: a core device views the
+    /// canvas as sRGB, and on a compatibility-mode device the canvas is
+    /// configured `Rgba8UnormSrgb`, which the surface emulates (see
+    /// [`Gpu::new`]). False only for a surface configured otherwise by hand.
     pub srgb: bool,
 }
 
@@ -229,6 +263,11 @@ impl Gpu {
     /// `wc_init` (or later). `None` if the host has no WebGPU device. The
     /// device has the host device's limits (`device.limits()`), which on a
     /// compatibility-mode host are below `wgpu::Limits::default()`.
+    ///
+    /// On a compatibility-mode device, which cannot view a canvas as sRGB,
+    /// the surface offers `Rgba8UnormSrgb` and copies each frame to the
+    /// canvas when it is presented; the canvas is configured with that, so
+    /// [`Frame::view`] is sRGB on every device.
     pub fn new(width: u32, height: u32) -> Option<Gpu> {
         // The device's own limits: a compatibility-mode device (the tier's
         // floor) has lower ones than wgpu's defaults, which are core WebGPU's.
@@ -259,11 +298,14 @@ impl Gpu {
     ) -> Gpu {
         let surface = canvas_surface(&instance);
         let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats[0];
         // An sRGB view of the canvas needs view-format reinterpretation,
-        // which compatibility mode (the tier's floor) does not allow.
-        let srgb = is_core(&device);
-        let view_formats = if srgb { alloc::vec![format.add_srgb_suffix()] } else { alloc::vec![] };
+        // which compatibility mode (the tier's floor) does not allow; there
+        // the surface offers an sRGB format of its own instead.
+        let (format, srgb, view_formats) = match caps.formats.iter().find(|f| f.is_srgb()) {
+            Some(&f) => (f, true, alloc::vec![]),
+            None if is_core(&device) => (caps.formats[0], true, alloc::vec![caps.formats[0].add_srgb_suffix()]),
+            None => (caps.formats[0], false, alloc::vec![]),
+        };
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -285,6 +327,7 @@ impl Gpu {
     /// [`Gpu::srgb`]). Use it for render pipeline targets.
     pub fn view_format(&self) -> wgpu::TextureFormat {
         if self.srgb {
+            // Rgba8UnormSrgb (compatibility mode) or the canvas format's sRGB form.
             self.config.format.add_srgb_suffix()
         } else {
             self.config.format
@@ -359,6 +402,16 @@ impl GpuRequest {
         Some(GpuRequest { instance: Some(instance), adapter: Some(adapter), fut, width, height })
     }
 
+    /// As [`GpuRequest::new`], for a **core** device: see [`request_core`].
+    /// Fails (`Some(Err(..))` from [`GpuRequest::poll`]) where the GPU has
+    /// only compatibility mode; fall back to [`Gpu::new`] then.
+    pub fn core(width: u32, height: u32, desc: &wgpu::DeviceDescriptor<'_>) -> Option<GpuRequest> {
+        let instance = instance();
+        let adapter = now(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))?.ok()?;
+        let fut: DeviceFuture = alloc::boxed::Box::pin(request_core(&adapter, desc));
+        Some(GpuRequest { instance: Some(instance), adapter: Some(adapter), fut, width, height })
+    }
+
     /// `None` while waiting; then the result, once.
     pub fn poll(&mut self) -> Option<Result<Gpu, wgpu::RequestDeviceError>> {
         match poll_once(self.fut.as_mut()) {
@@ -366,7 +419,9 @@ impl GpuRequest {
             Poll::Ready(Err(e)) => Some(Err(e)),
             Poll::Ready(Ok((device, queue))) => {
                 let instance = self.instance.take()?;
-                let adapter = self.adapter.take()?;
+                self.adapter.take()?;
+                // The adapter that describes the new device, not the host's.
+                let adapter = adapter_for(&device);
                 Some(Ok(Gpu::finish(instance, adapter, device, queue, self.width, self.height)))
             }
         }

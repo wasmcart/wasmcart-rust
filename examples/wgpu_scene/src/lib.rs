@@ -15,7 +15,10 @@
 //!
 //! Log lines (the gate reads them): "scene: readback ok ..." once the
 //! compute result is mapped and matches, "scene: errors none" once the error
-//! scope around setup pops clean, "scene: shader messages N".
+//! scope around setup pops clean, "scene: shader messages N", "scene: caps ..."
+//! (the limits and downlevel flags wgpu code reads: honest in compatibility
+//! mode), "scene: core request ..." (the result of asking for a core device
+//! with wasmcart_wgpu::request_core).
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -202,6 +205,30 @@ pub extern "C" fn wc_init() {
         gpu.srgb,
         gpu.adapter.get_info().name
     ));
+
+    let l = gpu.adapter.limits();
+    let dl = gpu.adapter.get_downlevel_capabilities().flags;
+    log(&format!(
+        "scene: caps storage_buffers={} storage_textures={} invocations={} cube_array={} vertex_storage={} independent_blend={} view_formats={} format={:?}",
+        l.max_storage_buffers_per_shader_stage,
+        l.max_storage_textures_per_shader_stage,
+        l.max_compute_invocations_per_workgroup,
+        dl.contains(wgpu::DownlevelFlags::CUBE_ARRAY_TEXTURES),
+        dl.contains(wgpu::DownlevelFlags::VERTEX_STORAGE),
+        dl.contains(wgpu::DownlevelFlags::INDEPENDENT_BLEND),
+        dl.contains(wgpu::DownlevelFlags::VIEW_FORMATS),
+        gpu.config.format,
+    ));
+    // Ask for a core device. On a core host its own device answers at once;
+    // on a compatibility-mode host a new device arrives between frames where
+    // the GPU has core, and the request fails where it does not.
+    let core = wasmcart_wgpu::request_core(&gpu.adapter, &wgpu::DeviceDescriptor::default());
+    PENDING.with(|p| p.borrow_mut().push(Box::pin(async move {
+        match core.await {
+            Ok((d, _q)) => log(&format!("scene: core request ok core={}", wasmcart_wgpu::is_core(&d))),
+            Err(e) => log(&format!("scene: core request failed: {e}")),
+        }
+    })));
 
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 

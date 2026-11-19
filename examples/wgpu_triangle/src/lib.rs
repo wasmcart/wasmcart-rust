@@ -19,8 +19,9 @@ const H: u32 = 480;
 wc_cart!(W, H, gpu_api: WC_GPU_API_WEBGPU);
 
 const SHADER: &str = r#"
-// True when the canvas view is not sRGB (a compatibility-mode device): the
-// shader encodes its linear colour itself (Gpu::srgb_constants).
+// True when the canvas view is not sRGB (a surface configured by hand without
+// an sRGB format; Gpu::new always has one): the shader encodes its linear
+// colour itself (Gpu::srgb_constants).
 override SRGB_ENCODE: bool = false;
 
 fn encode(c: vec3f) -> vec3f {

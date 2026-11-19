@@ -253,11 +253,37 @@ What differs from wgpu on a desktop:
   `wasmcart_wgpu::canvas_surface` (or `create_surface(CanvasWindow)`) gives it
   to code that sets surfaces up itself. Never present it yourself; the host
   does after `wc_render`.
-- **Compatibility mode** is the tier's floor. There the canvas has no sRGB
-  view, so `Gpu::srgb` is false: use `gpu.view_format()` for pipeline targets,
-  `gpu.clear_color(linear)` for clears, and have shaders encode sRGB when the
-  `SRGB_ENCODE` pipeline constant (`gpu.srgb_constants()`) says so. The
-  examples do. `wasmcart_wgpu::is_core(&device)` tells the two apart.
+- **Compatibility mode** is the tier's floor, and a cart that runs there
+  runs on every WebGPU host. The backend describes a compat device as it is,
+  so engines that read wgpu's limits and downlevel flags pick their fallback
+  paths: `max_storage_buffers_per_shader_stage` and
+  `max_storage_textures_per_shader_stage` are the smallest of the per-stage
+  compat limits (0 when the vertex stage has none, as wgpu's GLES backend
+  reports it), compute limits are the device's own (128 invocations), and
+  `CUBE_ARRAY_TEXTURES`, `INDEPENDENT_BLEND`, `MULTISAMPLED_SHADING`,
+  `VIEW_FORMATS`, `SURFACE_VIEW_FORMATS`, `DEPTH_BIAS_CLAMP` (and
+  `VERTEX_STORAGE` / `FRAGMENT_STORAGE` where those stages have none) are
+  off. `wasmcart_wgpu::is_core(&device)` tells the two levels apart.
+- **sRGB canvas everywhere.** A canvas has no sRGB format, and in compat no
+  sRGB view either, so there the surface offers `Rgba8UnormSrgb` itself: the
+  cart draws into a texture of that format and the backend copies it into an
+  `Rgba8Unorm` canvas when the frame is presented (or dropped). The bytes
+  are already sRGB-encoded, so colours match a core device exactly.
+  `Gpu::new` picks it, so `gpu.view_format()` is sRGB on every device and
+  `Gpu::srgb` is true; `gpu.clear_color` and `gpu.srgb_constants()` stay
+  for a surface configured otherwise by hand.
+- **What compat lacks, filled in where it is exact**: a cube array holding one
+  cube is a cube (views, bind group layouts, and the WGSL, whose array index
+  is dropped), `@interpolate(flat)` becomes `@interpolate(flat, either)`,
+  `depthBiasClamp` is 0, and a 6-layer 2D texture is made when its first
+  view says whether it is bound as a cube or a 2D array (compat fixes a
+  texture's binding dimension at creation). A cube array of several cubes
+  still fails, as it must.
+- **Asking for core.** `wasmcart_wgpu::request_core(&adapter, &desc)` (or
+  `GpuRequest::core`) asks for a core device (`core-features-and-limits`):
+  the host's own if it is core, else a new one that arrives between frames,
+  or an error where the GPU has no core. `wasmcart_wgpu::adapter_for(&device)`
+  gives the adapter that describes the device you got.
 - **Shaders** are WGSL, passed straight to the host. With the crate's
   `naga-ir` feature a `ShaderSource::Naga` module is validated and written
   out as WGSL in the cart (this pulls naga in, about 800 KB).

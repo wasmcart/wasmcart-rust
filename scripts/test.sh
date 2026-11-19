@@ -21,6 +21,12 @@ echo "── abi drift: constants must match the spec ──"
 node scripts/abi-drift.mjs
 echo
 
+# wasmcart-wgpu's own unit tests (the compatibility-mode WGSL translation),
+# on the host.
+echo "── wasmcart-wgpu unit tests ──"
+(cd wasmcart-wgpu && cargo test --lib --quiet)
+echo
+
 build_and_pack() {
   local dir=$1 name=$2
   echo "── $name ────────────────────────────────────────────"

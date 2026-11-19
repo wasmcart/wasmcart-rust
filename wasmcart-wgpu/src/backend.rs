@@ -172,7 +172,7 @@ impl InstanceInterface for WcInstance {
             Some(h) => h,
             None => panic!("wasmcart-wgpu: the host has no WebGPU canvas (\"#canvas\") for this cart"),
         };
-        Ok(DispatchSurface::custom(WcSurface { inner: h, configured: Cell::new(false) }))
+        Ok(DispatchSurface::custom(WcSurface { inner: h, configured: Cell::new(false), emulated: RefCell::new(None) }))
     }
 
     fn request_adapter(&self, _options: &wgpu::RequestAdapterOptions<'_, '_>) -> Pin<Box<dyn RequestAdapterFuture>> {
@@ -256,15 +256,106 @@ impl InstanceInterface for WcInstance {
 pub struct WcAdapter {
     instance: Handle,
     device: Handle,
-    features: wgt::Features,
-    limits: wgt::Limits,
+    caps: Caps,
+    /// Requests through this adapter also require `core-features-and-limits`.
+    want_core: bool,
 }
 
 impl WcAdapter {
     fn new(instance: Handle, device: Handle) -> Self {
-        let features = device_features(&device);
-        let limits = device_limits(&device);
-        WcAdapter { instance, device, features, limits }
+        let caps = device_caps(&device);
+        WcAdapter { instance, device, caps, want_core: false }
+    }
+
+    /// An adapter describing `device` (a device the host made on request).
+    pub(crate) fn for_device(instance: &WcInstance, device: &WcDevice) -> Self {
+        WcAdapter::new(instance.inner.clone(), device.inner.clone())
+    }
+
+    /// The same adapter, asking for a core device in every request.
+    pub(crate) fn wanting_core(&self) -> Self {
+        WcAdapter { instance: self.instance.clone(), device: self.device.clone(), caps: self.caps.clone(), want_core: true }
+    }
+
+    /// The host's device is a core device.
+    pub(crate) fn is_core(&self) -> bool {
+        self.caps.core
+    }
+}
+
+/// What a device can do, in wgpu's terms.
+#[derive(Debug, Clone)]
+pub(crate) struct Caps {
+    features: wgt::Features,
+    /// The device's limits exactly as WebGPU reports them; requests are
+    /// checked against these.
+    raw_limits: wgt::Limits,
+    /// The limits wgpu code sees. On a core device the same as
+    /// `raw_limits`. In compatibility mode WebGPU has per-stage storage
+    /// limits wgpu cannot express (`maxStorageBuffersInVertexStage` is 0 by
+    /// default), and wgpu's single per-stage limit means "in every stage", so
+    /// it is the smallest of them, as wgpu's own GLES backend reports it.
+    limits: wgt::Limits,
+    downlevel: wgt::DownlevelCapabilities,
+    core: bool,
+}
+
+fn device_caps(device: &Handle) -> Caps {
+    let core = unsafe { wgpuDeviceHasFeature(device.raw(), WGPUFeatureName_CoreFeaturesAndLimits) != 0 };
+    let mut compat = WGPUCompatibilityModeLimits {
+        chain: WGPUChainedStruct { next: null_mut(), sType: WGPUSType_CompatibilityModeLimits },
+        maxStorageBuffersInVertexStage: 0,
+        maxStorageTexturesInVertexStage: 0,
+        maxStorageBuffersInFragmentStage: 0,
+        maxStorageTexturesInFragmentStage: 0,
+    };
+    let mut l: WGPULimits = unsafe { core::mem::zeroed() };
+    l.nextInChain = &mut compat.chain;
+    unsafe { wgpuDeviceGetLimits(device.raw(), &mut l) };
+    l.nextInChain = null_mut();
+    let raw_limits = conv::limits_from(&l);
+    let mut limits = raw_limits.clone();
+    let mut downlevel = wgt::DownlevelCapabilities::default();
+    if !core {
+        compat_caps(&l, &compat, &mut limits, &mut downlevel.flags);
+    }
+    Caps { features: device_features(device), raw_limits, limits, downlevel, core }
+}
+
+/// A compatibility-mode device described honestly (wasmcart SPEC.md,
+/// "Feature level"), so wgpu code that reads limits and downlevel flags
+/// takes its fallback paths instead of failing validation.
+fn compat_caps(
+    l: &WGPULimits,
+    c: &WGPUCompatibilityModeLimits,
+    limits: &mut wgt::Limits,
+    flags: &mut wgt::DownlevelFlags,
+) {
+    use wgt::DownlevelFlags as F;
+    limits.max_storage_buffers_per_shader_stage = l
+        .maxStorageBuffersPerShaderStage
+        .min(c.maxStorageBuffersInVertexStage)
+        .min(c.maxStorageBuffersInFragmentStage);
+    limits.max_storage_textures_per_shader_stage = l
+        .maxStorageTexturesPerShaderStage
+        .min(c.maxStorageTexturesInVertexStage)
+        .min(c.maxStorageTexturesInFragmentStage);
+    // No cube-array views, one blend state for every colour attachment, no
+    // sample_mask / sample_index, no view-format reinterpretation (textures
+    // or the canvas), depthBiasClamp must be 0.
+    flags.remove(
+        F::CUBE_ARRAY_TEXTURES
+            | F::INDEPENDENT_BLEND
+            | F::MULTISAMPLED_SHADING
+            | F::VIEW_FORMATS
+            | F::SURFACE_VIEW_FORMATS
+            | F::DEPTH_BIAS_CLAMP,
+    );
+    if c.maxStorageBuffersInVertexStage == 0 && c.maxStorageTexturesInVertexStage == 0 {
+        flags.remove(F::VERTEX_STORAGE);
+    }
+    if c.maxStorageBuffersInFragmentStage == 0 && c.maxStorageTexturesInFragmentStage == 0 {
+        flags.remove(F::FRAGMENT_STORAGE | F::FRAGMENT_WRITABLE_STORAGE);
     }
 }
 
@@ -278,12 +369,6 @@ fn device_features(device: &Handle) -> wgt::Features {
     let f = conv::features_from(names);
     unsafe { crate::alloc_exports::host_free(sf.features as *mut u8) };
     f
-}
-
-fn device_limits(device: &Handle) -> wgt::Limits {
-    let mut l: WGPULimits = unsafe { core::mem::zeroed() };
-    unsafe { wgpuDeviceGetLimits(device.raw(), &mut l) };
-    conv::limits_from(&l)
 }
 
 fn device_adapter_info(device: &Handle) -> wgt::AdapterInfo {
@@ -347,12 +432,10 @@ fn make_device_pair(
         emwgpu::add_ref(q);
         Handle::from_owned(q).expect("device without a queue")
     };
-    let features = device_features(&device);
-    let limits = device_limits(&device);
+    let caps = device_caps(&device);
     let dev = WcDevice {
         inner: device,
-        features,
-        limits,
+        caps,
         error_scopes: Cell::new(0),
         lost,
     };
@@ -361,12 +444,13 @@ fn make_device_pair(
 
 impl AdapterInterface for WcAdapter {
     fn request_device(&self, desc: &wgpu::DeviceDescriptor<'_>) -> Pin<Box<dyn RequestDeviceFuture>> {
-        if self.features.contains(desc.required_features)
-            && conv::limits_satisfy(&self.limits, &desc.required_limits)
+        if (self.caps.core || !self.want_core)
+            && self.caps.features.contains(desc.required_features)
+            && conv::limits_satisfy(&self.caps.raw_limits, &desc.required_limits)
         {
             return Box::pin(ready(Ok(make_device_pair(self.device.clone(), Rc::new(RefCell::new(None))))));
         }
-        Box::pin(request_device_from_host(&self.instance, desc))
+        Box::pin(request_device_from_host(&self.instance, desc, self.want_core))
     }
 
     fn is_surface_supported(&self, _surface: &DispatchSurface) -> bool {
@@ -374,15 +458,15 @@ impl AdapterInterface for WcAdapter {
     }
 
     fn features(&self) -> wgpu::Features {
-        self.features
+        self.caps.features
     }
 
     fn limits(&self) -> wgpu::Limits {
-        self.limits.clone()
+        self.caps.limits.clone()
     }
 
     fn downlevel_capabilities(&self) -> wgpu::DownlevelCapabilities {
-        wgpu::DownlevelCapabilities::default()
+        self.caps.downlevel.clone()
     }
 
     fn get_info(&self) -> wgpu::AdapterInfo {
@@ -390,7 +474,7 @@ impl AdapterInterface for WcAdapter {
     }
 
     fn get_texture_format_features(&self, format: wgpu::TextureFormat) -> wgpu::TextureFormatFeatures {
-        format.guaranteed_format_features(self.features)
+        format.guaranteed_format_features(self.caps.features)
     }
 
     fn get_presentation_timestamp(&self) -> wgpu::PresentationTimestamp {
@@ -403,17 +487,23 @@ impl AdapterInterface for WcAdapter {
 }
 
 /// Ask the host for a real adapter, then a device made for `desc`. Both
-/// arrive between frames.
-fn request_device_from_host(
+/// arrive between frames. `core` also requires `core-features-and-limits`
+/// (wgpu has no Feature for it): a core device where the GPU has one, or a
+/// failed request.
+pub(crate) fn request_device_from_host(
     instance: &Handle,
     desc: &wgpu::DeviceDescriptor<'_>,
+    core: bool,
 ) -> Slot<Result<(DispatchDevice, DispatchQueue), wgpu::RequestDeviceError>> {
     let slot = Slot::new();
-    let features: Vec<WGPUFeatureName> = conv::FEATURES
+    let mut features: Vec<WGPUFeatureName> = conv::FEATURES
         .iter()
         .filter(|(f, _)| desc.required_features.contains(*f))
         .map(|(_, n)| *n)
         .collect();
+    if core {
+        features.push(WGPUFeatureName_CoreFeaturesAndLimits);
+    }
     let limits = conv::limits_to(&desc.required_limits);
     let label: Option<String> = desc.label.map(|s| s.to_string());
     let lost: Rc<RefCell<Option<BoxDeviceLostCallback>>> = Rc::new(RefCell::new(None));
@@ -510,8 +600,7 @@ fn format_msg(what: &str, message: &str) -> String {
 /// A device: the host's, or one requested for more features or limits.
 pub struct WcDevice {
     pub(crate) inner: Handle,
-    features: wgt::Features,
-    limits: wgt::Limits,
+    caps: Caps,
     error_scopes: Cell<u32>,
     lost: Rc<RefCell<Option<BoxDeviceLostCallback>>>,
 }
@@ -526,6 +615,16 @@ impl WcDevice {
     fn raw(&self) -> WGPUDevice {
         self.inner.raw()
     }
+
+    /// A cube-array binding is a cube on a compatibility-mode device, which
+    /// has no cube arrays (see crate::compat).
+    fn compat_view_dimension(&self, d: WGPUTextureViewDimension) -> WGPUTextureViewDimension {
+        if !self.caps.core && d == WGPUTextureViewDimension_CubeArray {
+            WGPUTextureViewDimension_Cube
+        } else {
+            d
+        }
+    }
 }
 
 fn constants(c: &[(&str, f64)]) -> Vec<WGPUConstantEntry> {
@@ -535,6 +634,8 @@ fn constants(c: &[(&str, f64)]) -> Vec<WGPUConstantEntry> {
 }
 
 fn shader_module_from_wgsl(device: &WcDevice, label: Option<&str>, code: &str) -> WcShaderModule {
+    let translated = if device.caps.core { None } else { crate::compat::translate_wgsl(code) };
+    let code = translated.as_deref().unwrap_or(code);
     let mut src = WGPUShaderSourceWGSL {
         chain: WGPUChainedStruct { next: null_mut(), sType: WGPUSType_ShaderSourceWGSL },
         code: sv(code),
@@ -557,11 +658,11 @@ fn naga_to_wgsl(module: &naga::Module) -> Result<String, String> {
 
 impl DeviceInterface for WcDevice {
     fn features(&self) -> wgpu::Features {
-        self.features
+        self.caps.features
     }
 
     fn limits(&self) -> wgpu::Limits {
-        self.limits.clone()
+        self.caps.limits.clone()
     }
 
     fn adapter_info(&self) -> wgpu::AdapterInfo {
@@ -632,7 +733,7 @@ impl DeviceInterface for WcDevice {
                     }
                     wgt::BindingType::Texture { sample_type, view_dimension, multisampled } => {
                         out.texture.sampleType = conv::sample_type(sample_type);
-                        out.texture.viewDimension = conv::texture_view_dimension(view_dimension);
+                        out.texture.viewDimension = self.compat_view_dimension(conv::texture_view_dimension(view_dimension));
                         out.texture.multisampled = conv::bool(multisampled);
                     }
                     wgt::BindingType::StorageTexture { access, format, view_dimension } => {
@@ -785,7 +886,8 @@ impl DeviceInterface for WcDevice {
             stencilWriteMask: ds.stencil.write_mask,
             depthBias: ds.bias.constant,
             depthBiasSlopeScale: ds.bias.slope_scale,
-            depthBiasClamp: ds.bias.clamp,
+            // compatibility mode requires 0 (no DEPTH_BIAS_CLAMP downlevel flag)
+            depthBiasClamp: if self.caps.core { ds.bias.clamp } else { 0.0 },
         });
 
         let blends: Vec<Option<WGPUBlendState>> = desc
@@ -940,21 +1042,34 @@ impl DeviceInterface for WcDevice {
     }
 
     fn create_texture(&self, desc: &wgpu::TextureDescriptor<'_>) -> DispatchTexture {
-        let view_formats: Vec<WGPUTextureFormat> = desc.view_formats.iter().map(|f| conv::texture_format(*f)).collect();
-        let d = WGPUTextureDescriptor {
-            nextInChain: NULL_CHAIN,
-            label: osv(desc.label),
+        let pending = PendingTexture {
+            device: self.inner.clone(),
+            label: desc.label.map(String::from),
             usage: desc.usage.bits() as u64 & 0x1F,
             dimension: conv::texture_dimension(desc.dimension),
             size: conv::extent(desc.size),
             format: conv::texture_format(desc.format),
-            mipLevelCount: desc.mip_level_count,
-            sampleCount: desc.sample_count,
-            viewFormatCount: view_formats.len(),
-            viewFormats: view_formats.as_ptr(),
+            mip_level_count: desc.mip_level_count,
+            sample_count: desc.sample_count,
+            view_formats: desc.view_formats.iter().map(|f| conv::texture_format(*f)).collect(),
         };
-        let p = unsafe { wgpuDeviceCreateTexture(self.raw(), &d) };
-        DispatchTexture::custom(WcTexture { inner: owned(p, "createTexture") })
+        // A compatibility-mode texture is bound with one view dimension,
+        // fixed when it is made (textureBindingViewDimension). WebGPU's
+        // default for a 2D texture of several layers is 2d-array, so one that
+        // will be bound as a cube must say so. wgpu's descriptor does not
+        // carry it, so a 6-layer 2D texture is made when its first view is
+        // (that view's dimension tells), or, used before any view, as a cube.
+        let deferred = !self.caps.core
+            && desc.dimension == wgt::TextureDimension::D2
+            && desc.size.depth_or_array_layers == 6
+            && desc.usage.contains(wgt::TextureUsages::TEXTURE_BINDING);
+        let tex = WcTexture { inner: core::cell::OnceCell::new(), pending: RefCell::new(None), layers: desc.size.depth_or_array_layers, core: self.caps.core };
+        if deferred {
+            *tex.pending.borrow_mut() = Some(pending);
+        } else {
+            let _ = tex.inner.set(pending.create(None));
+        }
+        DispatchTexture::custom(tex)
     }
 
     fn create_external_texture(
@@ -1134,7 +1249,7 @@ fn dbuf(b: &DispatchBuffer) -> WGPUBuffer {
 
 fn texel_texture(t: &wgpu::TexelCopyTextureInfo<'_>) -> WGPUTexelCopyTextureInfo {
     WGPUTexelCopyTextureInfo {
-        texture: custom_texture(t.texture).inner.raw(),
+        texture: custom_texture(t.texture).handle(None).raw(),
         mipLevel: t.mip_level,
         origin: conv::origin(t.origin),
         aspect: conv::aspect(t.aspect),
@@ -1237,9 +1352,13 @@ impl QueueInterface for WcQueue {
         panic!("wasmcart-wgpu: ray tracing is not in WebGPU")
     }
 
-    fn present(&self, _detail: &DispatchSurfaceOutputDetail) {
+    fn present(&self, detail: &DispatchSurfaceOutputDetail) {
         // The host presents "#canvas" after wc_render returns; a cart must
-        // not call wgpuSurfacePresent (wasmcart SPEC.md, "Presenting").
+        // not call wgpuSurfacePresent (wasmcart SPEC.md, "Presenting"). An
+        // emulated sRGB canvas is copied to the real one here.
+        if let Some(d) = detail.as_custom::<WcSurfaceOutputDetail>() {
+            d.finish();
+        }
     }
 }
 
@@ -1493,15 +1612,100 @@ impl QueueWriteBufferInterface for WcQueueWriteBuffer {
 
 #[derive(Debug)]
 pub struct WcTexture {
-    pub(crate) inner: Handle,
+    inner: core::cell::OnceCell<Handle>,
+    /// A texture whose creation waits for its first view (see create_texture).
+    pending: RefCell<Option<PendingTexture>>,
+    layers: u32,
+    core: bool,
 }
+
+/// A texture descriptor kept until the texture is made.
+struct PendingTexture {
+    device: Handle,
+    label: Option<String>,
+    usage: u64,
+    dimension: WGPUTextureDimension,
+    size: WGPUExtent3D,
+    format: WGPUTextureFormat,
+    mip_level_count: u32,
+    sample_count: u32,
+    view_formats: Vec<WGPUTextureFormat>,
+}
+
+impl core::fmt::Debug for PendingTexture {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PendingTexture").field("label", &self.label).finish()
+    }
+}
+
+impl PendingTexture {
+    fn create(&self, binding: Option<WGPUTextureViewDimension>) -> Handle {
+        let mut chain = WGPUTextureBindingViewDimension {
+            chain: WGPUChainedStruct { next: null_mut(), sType: WGPUSType_TextureBindingViewDimension },
+            textureBindingViewDimension: binding.unwrap_or(WGPUTextureViewDimension_Undefined),
+        };
+        let d = WGPUTextureDescriptor {
+            nextInChain: if binding.is_some() { &mut chain.chain } else { NULL_CHAIN },
+            label: osv(self.label.as_deref()),
+            usage: self.usage,
+            dimension: self.dimension,
+            size: self.size,
+            format: self.format,
+            mipLevelCount: self.mip_level_count,
+            sampleCount: self.sample_count,
+            viewFormatCount: self.view_formats.len(),
+            viewFormats: self.view_formats.as_ptr(),
+        };
+        owned(unsafe { wgpuDeviceCreateTexture(self.device.raw(), &d) }, "createTexture")
+    }
+}
+
+impl WcTexture {
+    fn from_handle(inner: Handle) -> Self {
+        let cell = core::cell::OnceCell::new();
+        let _ = cell.set(inner);
+        WcTexture { inner: cell, pending: RefCell::new(None), layers: 1, core: true }
+    }
+
+    /// The texture, made now if it was waiting; `view` is the dimension of
+    /// the view that needs it, if a view does.
+    fn handle(&self, view: Option<WGPUTextureViewDimension>) -> &Handle {
+        self.inner.get_or_init(|| {
+            let p = self.pending.borrow_mut().take().expect("texture neither made nor pending");
+            let binding = match view {
+                Some(WGPUTextureViewDimension_2DArray) => WGPUTextureViewDimension_2DArray,
+                Some(WGPUTextureViewDimension_2D) => WGPUTextureViewDimension_2DArray,
+                _ => WGPUTextureViewDimension_Cube,
+            };
+            p.create(Some(binding))
+        })
+    }
+}
+
 impl TextureInterface for WcTexture {
     fn create_view(&self, desc: &wgpu::TextureViewDescriptor<'_>) -> DispatchTextureView {
+        let mut dimension = desc.dimension.map(conv::texture_view_dimension).unwrap_or(WGPUTextureViewDimension_Undefined);
+        // Compatibility mode: a cube array of one cube is a cube (crate::compat).
+        if !self.core
+            && dimension == WGPUTextureViewDimension_CubeArray
+            && desc.base_array_layer == 0
+            && desc.array_layer_count.unwrap_or(self.layers) == 6
+        {
+            dimension = WGPUTextureViewDimension_Cube;
+        }
+        // A single layer of a multi-layer texture (a render target) does not
+        // say how the texture is bound.
+        let hint = match dimension {
+            WGPUTextureViewDimension_2D if desc.array_layer_count != Some(self.layers) => None,
+            WGPUTextureViewDimension_Undefined => None,
+            d => Some(d),
+        };
+        let raw = self.handle(hint).raw();
         let d = WGPUTextureViewDescriptor {
             nextInChain: NULL_CHAIN,
             label: osv(desc.label),
             format: desc.format.map(conv::texture_format).unwrap_or(WGPUTextureFormat_Undefined),
-            dimension: desc.dimension.map(conv::texture_view_dimension).unwrap_or(WGPUTextureViewDimension_Undefined),
+            dimension,
             baseMipLevel: desc.base_mip_level,
             mipLevelCount: desc.mip_level_count.unwrap_or(WGPU_MIP_LEVEL_COUNT_UNDEFINED),
             baseArrayLayer: desc.base_array_layer,
@@ -1509,12 +1713,15 @@ impl TextureInterface for WcTexture {
             aspect: conv::aspect(desc.aspect),
             usage: desc.usage.map(|u| u.bits() as u64 & 0x1F).unwrap_or(0),
         };
-        let p = unsafe { wgpuTextureCreateView(self.inner.raw(), &d) };
+        let p = unsafe { wgpuTextureCreateView(raw, &d) };
         DispatchTextureView::custom(WcTextureView { inner: owned(p, "createView") })
     }
 
     fn destroy(&self) {
-        unsafe { wgpuTextureDestroy(self.inner.raw()) };
+        match self.inner.get() {
+            Some(h) => unsafe { wgpuTextureDestroy(h.raw()) },
+            None => drop(self.pending.borrow_mut().take()),
+        }
     }
 }
 
@@ -2123,14 +2330,37 @@ impl RenderBundleEncoderInterface for WcRenderBundleEncoder {
 // ---------------------------------------------------------------------------
 
 /// The cart's canvas ("#canvas"), a texture the host owns and presents.
+///
+/// On a compatibility-mode device a canvas has no sRGB view (no view-format
+/// reinterpretation, and no `bgra8unorm-srgb` at all), so the surface also
+/// offers `Rgba8UnormSrgb`: configured with it, the cart draws into an
+/// `Rgba8UnormSrgb` texture of the canvas size and, when the frame is
+/// presented (or dropped), it is copied byte for byte into an `Rgba8Unorm`
+/// canvas. The bytes already hold sRGB-encoded colour, so the canvas shows
+/// what a core device's sRGB view would.
 #[derive(Debug)]
 pub struct WcSurface {
     inner: Handle,
     configured: Cell<bool>,
+    emulated: RefCell<Option<SrgbCanvas>>,
+}
+
+/// The texture an emulated sRGB canvas is drawn into, and where it goes.
+#[derive(Debug, Clone)]
+struct SrgbCanvas {
+    device: Handle,
+    queue: Handle,
+    texture: Handle,
+    width: u32,
+    height: u32,
+}
+
+fn adapter_is_core(adapter: &DispatchAdapter) -> bool {
+    adapter.as_custom::<WcAdapter>().map(|a| a.is_core()).unwrap_or(true)
 }
 
 impl SurfaceInterface for WcSurface {
-    fn get_capabilities(&self, _adapter: &DispatchAdapter) -> wgpu::SurfaceCapabilities {
+    fn get_capabilities(&self, adapter: &DispatchAdapter) -> wgpu::SurfaceCapabilities {
         let preferred = match unsafe { emwgpu::emwgpuGetPreferredFormat() } {
             WGPUTextureFormat_RGBA8Unorm => wgpu::TextureFormat::Rgba8Unorm,
             _ => wgpu::TextureFormat::Bgra8Unorm,
@@ -2140,7 +2370,10 @@ impl SurfaceInterface for WcSurface {
         } else {
             wgpu::TextureFormat::Rgba8Unorm
         };
-        let formats = vec![preferred, other, wgpu::TextureFormat::Rgba16Float];
+        let mut formats = vec![preferred, other, wgpu::TextureFormat::Rgba16Float];
+        if !adapter_is_core(adapter) {
+            formats.push(wgpu::TextureFormat::Rgba8UnormSrgb);
+        }
         wgpu::SurfaceCapabilities {
             format_capabilities: formats
                 .iter()
@@ -2161,12 +2394,27 @@ impl SurfaceInterface for WcSurface {
 
     fn configure(&self, device: &DispatchDevice, config: &wgpu::SurfaceConfiguration) {
         let dev = device.as_custom::<WcDevice>().expect("not a wasmcart device");
-        let view_formats: Vec<WGPUTextureFormat> = config.view_formats.iter().map(|f| conv::texture_format(*f)).collect();
+        // A canvas is never an sRGB format; an sRGB surface is drawn into a
+        // texture of that format and copied (see WcSurface).
+        let emulate = config.format.is_srgb();
+        let (format, usage, view_formats): (WGPUTextureFormat, u64, Vec<WGPUTextureFormat>) = if emulate {
+            (
+                conv::texture_format(config.format.remove_srgb_suffix()),
+                wgpu::TextureUsages::COPY_DST.bits() as u64,
+                Vec::new(),
+            )
+        } else {
+            (
+                conv::texture_format(config.format),
+                config.usage.bits() as u64 & 0x1F,
+                config.view_formats.iter().map(|f| conv::texture_format(*f)).collect(),
+            )
+        };
         let c = WGPUSurfaceConfiguration {
             nextInChain: NULL_CHAIN,
             device: dev.raw(),
-            format: conv::texture_format(config.format),
-            usage: config.usage.bits() as u64 & 0x1F,
+            format,
+            usage,
             width: config.width,
             height: config.height,
             viewFormatCount: view_formats.len(),
@@ -2178,13 +2426,36 @@ impl SurfaceInterface for WcSurface {
             presentMode: WGPUPresentMode_Fifo,
         };
         unsafe { wgpuSurfaceConfigure(self.inner.raw(), &c) };
+        *self.emulated.borrow_mut() = if emulate {
+            let d = WGPUTextureDescriptor {
+                nextInChain: NULL_CHAIN,
+                label: osv(Some("wasmcart-wgpu sRGB canvas")),
+                usage: (config.usage | wgpu::TextureUsages::COPY_SRC).bits() as u64 & 0x1F,
+                dimension: WGPUTextureDimension_2D,
+                size: WGPUExtent3D { width: config.width, height: config.height, depthOrArrayLayers: 1 },
+                format: conv::texture_format(config.format),
+                mipLevelCount: 1,
+                sampleCount: 1,
+                viewFormatCount: 0,
+                viewFormats: null(),
+            };
+            let texture = owned(unsafe { wgpuDeviceCreateTexture(dev.raw(), &d) }, "createTexture (sRGB canvas)");
+            let queue = unsafe {
+                let q = emwgpu::queue_of(dev.inner.obj());
+                emwgpu::add_ref(q);
+                Handle::from_owned(q).expect("device without a queue")
+            };
+            Some(SrgbCanvas { device: dev.inner.clone(), queue, texture, width: config.width, height: config.height })
+        } else {
+            None
+        };
         self.configured.set(true);
     }
 
     fn get_current_texture(&self) -> (Option<DispatchTexture>, wgpu::SurfaceStatus, DispatchSurfaceOutputDetail) {
-        let detail = DispatchSurfaceOutputDetail::custom(WcSurfaceOutputDetail);
+        let none = || DispatchSurfaceOutputDetail::custom(WcSurfaceOutputDetail { pending: RefCell::new(None) });
         if !self.configured.get() {
-            return (None, wgpu::SurfaceStatus::Outdated, detail);
+            return (None, wgpu::SurfaceStatus::Outdated, none());
         }
         let mut st = WGPUSurfaceTexture { nextInChain: NULL_CHAIN, texture: null_mut(), status: 0 };
         unsafe { wgpuSurfaceGetCurrentTexture(self.inner.raw(), &mut st) };
@@ -2192,17 +2463,57 @@ impl SurfaceInterface for WcSurface {
             Some(h) if st.status == WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
                 || st.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal =>
             {
-                (Some(DispatchTexture::custom(WcTexture { inner: h })), wgpu::SurfaceStatus::Good, detail)
+                match self.emulated.borrow().clone() {
+                    Some(e) => {
+                        let tex = WcTexture::from_handle(e.texture.clone());
+                        let detail = WcSurfaceOutputDetail { pending: RefCell::new(Some((e, h))) };
+                        (Some(DispatchTexture::custom(tex)), wgpu::SurfaceStatus::Good, DispatchSurfaceOutputDetail::custom(detail))
+                    }
+                    None => (Some(DispatchTexture::custom(WcTexture::from_handle(h))), wgpu::SurfaceStatus::Good, none()),
+                }
             }
-            _ => (None, wgpu::SurfaceStatus::Lost, detail),
+            _ => (None, wgpu::SurfaceStatus::Lost, none()),
         }
     }
 }
 
+/// A frame of an emulated sRGB canvas still to be copied to the canvas.
 #[derive(Debug)]
-pub struct WcSurfaceOutputDetail;
+pub struct WcSurfaceOutputDetail {
+    pending: RefCell<Option<(SrgbCanvas, Handle)>>,
+}
+
+impl WcSurfaceOutputDetail {
+    /// Copy the frame to the canvas (once). The host presents the canvas
+    /// after wc_render returns.
+    fn finish(&self) {
+        let Some((e, canvas)) = self.pending.borrow_mut().take() else { return };
+        let tex = |t: &Handle| WGPUTexelCopyTextureInfo {
+            texture: t.raw(),
+            mipLevel: 0,
+            origin: WGPUOrigin3D { x: 0, y: 0, z: 0 },
+            aspect: WGPUTextureAspect_All,
+        };
+        let (src, dst) = (tex(&e.texture), tex(&canvas));
+        let size = WGPUExtent3D { width: e.width, height: e.height, depthOrArrayLayers: 1 };
+        unsafe {
+            let d = WGPUCommandEncoderDescriptor { nextInChain: NULL_CHAIN, label: osv(None) };
+            let enc = owned(wgpuDeviceCreateCommandEncoder(e.device.raw(), &d), "createCommandEncoder");
+            wgpuCommandEncoderCopyTextureToTexture(enc.raw(), &src, &dst, &size);
+            let d = WGPUCommandBufferDescriptor { nextInChain: NULL_CHAIN, label: osv(None) };
+            let cb = owned(wgpuCommandEncoderFinish(enc.raw(), &d), "finish");
+            let raw: [WGPUCommandBuffer; 1] = [cb.raw()];
+            wgpuQueueSubmit(e.queue.raw(), 1, raw.as_ptr());
+        }
+    }
+}
+
 impl SurfaceOutputDetailInterface for WcSurfaceOutputDetail {
-    fn texture_discard(&self) {}
+    fn texture_discard(&self) {
+        // A cart may drop its frame instead of presenting it; the host
+        // presents the canvas either way, so it gets the frame either way.
+        self.finish();
+    }
     fn texture_release(&self) {}
 }
 
@@ -2238,6 +2549,6 @@ send_sync!(
 impl WcDevice {
     /// A core device (`core-features-and-limits`), not compatibility mode.
     pub fn is_core(&self) -> bool {
-        unsafe { wgpuDeviceHasFeature(self.raw(), WGPUFeatureName_CoreFeaturesAndLimits) != 0 }
+        self.caps.core
     }
 }

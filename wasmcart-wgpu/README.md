@@ -16,8 +16,10 @@ gpu.present(frame);
 ```
 
 See the "WebGPU carts, with wgpu" section of the wasmcart-rust README for the
-rules the host imposes (nothing blocks; one canvas the host presents;
-compatibility mode has no sRGB canvas view) and what is not available.
+rules the host imposes (nothing blocks; one canvas the host presents), how a
+compatibility-mode device is described and filled in (honest limits and
+downlevel flags, an emulated sRGB canvas, one-cube cube arrays), how to ask
+for a core device, and what is not available.
 
 Features:
 
